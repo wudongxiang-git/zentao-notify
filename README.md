@@ -66,18 +66,49 @@ python main.py --once --webhook "https://open.feishu.cn/open-apis/bot/v2/hook/xx
 - 使用禅道 RESTful API v2：`POST /api.php/v2/users/login` 获取 Token，再请求 `GET /api.php/v2/products` 与 `GET /api.php/v2/products/:productID/bugs` 获取 Bug 列表
 - 按 `openedDate`、`lastEditedDate` 与上次检查时间过滤，只推送新产生或新更新的 Bug
 
+## Docker
+
+镜像内默认 `STATE_FILE=/data/state.json`，建议挂载持久化目录并传入环境变量：
+
+```bash
+docker run -d --name zentao-notify \
+  -e ZENTAO_BASE_URL=http://禅道地址 \
+  -e ZENTAO_ACCOUNT=账号 \
+  -e ZENTAO_PASSWORD=密码 \
+  -e FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxx \
+  -v /path/to/data:/data \
+  ghcr.io/你的用户名/zentao-notify:latest
+```
+
+单次执行（例如配合 cron）：
+
+```bash
+docker run --rm \
+  -e ZENTAO_BASE_URL=... -e ZENTAO_ACCOUNT=... -e ZENTAO_PASSWORD=... \
+  -e FEISHU_WEBHOOK_URL=... \
+  -v /path/to/data:/data \
+  ghcr.io/你的用户名/zentao-notify:latest python main.py --once
+```
+
+## GitHub Actions
+
+推送 `main`/`master` 或打 tag `v*` 时会自动构建并推送镜像到 GitHub Container Registry（ghcr.io）。  
+PR 仅构建不推送。镜像标签：分支名、`latest`（main/master）、`v1.0.0`、`v1.0`、短 SHA。
+
 ## 项目结构
 
 ```
 zentao-notify/
-├── config.py          # 配置（环境变量 / .env）
-├── zentao_client.py   # 禅道 API 客户端
-├── feishu_notifier.py # 飞书通知（文本 + Bug 卡片）
-├── notifier.py        # 轮询、去重、推送逻辑
-├── main.py            # 入口（--once / 常驻）
+├── .github/workflows/build.yml  # CI：构建并推送 Docker 镜像
+├── config.py                    # 配置（环境变量 / .env）
+├── zentao_client.py             # 禅道 API 客户端
+├── feishu_notifier.py           # 飞书通知（文本 + Bug 卡片）
+├── notifier.py                  # 轮询、去重、推送逻辑
+├── main.py                      # 入口（--once / 常驻）
+├── Dockerfile
 ├── requirements.txt
 ├── README.md
-└── state.json         # 运行后生成，记录上次检查时间
+└── state.json                   # 运行后生成，记录上次检查时间
 ```
 
 ## 故障排查
