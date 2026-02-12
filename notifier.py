@@ -49,10 +49,11 @@ def save_state(last_check_time, state_file=None):
         logger.error("写入状态文件失败: %s", e)
 
 
-def run_once(webhook_url=None, state_file=None):
+def run_once(webhook_url=None, state_file=None, client=None):
     """
     执行一次：拉取自上次检查以来的 Bug，推送到飞书，更新状态。
     首次运行（无 state）仅写入当前时间，不推送历史 Bug。
+    client 为 None 时内部新建 ZenTaoClient；传入时复用（登录状态会缓存）。
     返回本轮推送的 Bug 数量。
     """
     state_file = state_file or Config.STATE_FILE
@@ -65,17 +66,12 @@ def run_once(webhook_url=None, state_file=None):
     if Config.ZENTAO_PRODUCT_IDS:
         product_ids = [x.strip() for x in Config.ZENTAO_PRODUCT_IDS.split(",") if x.strip()]
 
-    client = ZenTaoClient()
+    if client is None:
+        client = ZenTaoClient()
     notifier = FeishuNotifier(webhook_url=webhook_url or Config.FEISHU_WEBHOOK_URL)
 
     if not notifier.webhook_url:
         logger.warning("未配置 FEISHU_WEBHOOK_URL，跳过推送")
-        return 0
-
-    try:
-        client.login()
-    except ZenTaoClientError as e:
-        logger.error("禅道登录失败: %s", e)
         return 0
 
     try:

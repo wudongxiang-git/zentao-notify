@@ -8,6 +8,7 @@ import time
 
 from config import Config
 from notifier import run_once
+from zentao_client import ZenTaoClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,12 +38,13 @@ def main():
         run_once(webhook_url=args.webhook)
         return
 
-    # 常驻轮询
+    # 常驻轮询（复用同一客户端，避免每轮重复登录）
     interval = max(60, Config.POLL_INTERVAL)
     logger.info("常驻轮询模式，间隔 %s 秒", interval)
+    client = ZenTaoClient()
     while True:
         try:
-            run_once(webhook_url=args.webhook)
+            run_once(webhook_url=args.webhook, client=client)
         except Exception as e:
             logger.error("本轮执行异常: %s", e, exc_info=True)
         try:

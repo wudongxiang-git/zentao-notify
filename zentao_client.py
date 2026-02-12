@@ -16,6 +16,11 @@ class ZenTaoClientError(Exception):
     pass
 
 
+class ZenTaoAuthError(ZenTaoClientError):
+    """认证失效（如 token 过期），清空登录状态后可由调用方重试"""
+    pass
+
+
 def _normalize_bug(b):
     """将禅道 Bug 对象统一为含 openedDate、lastEditedDate、product、module 等字段的字典。"""
     opened = (b.get("openedDate") or "").strip()
@@ -193,11 +198,37 @@ class ZenTaoClient:
         if not self._logged_in:
             self.login()
 
+    def _clear_login(self):
+        """清空登录状态（token 失效时调用，便于重试时重新登录）。"""
+        self._logged_in = False
+        self._token = None
+        self._session.headers.pop("Token", None)
+
+    def _is_auth_fail(self, status_code, data):
+        """判断是否为认证/授权失败，需重登。"""
+        if status_code == 401:
+            return True
+        if status_code == 403:
+            return True
+        if not isinstance(data, dict):
+            return False
+        if data.get("status") == "fail":
+            msg = (data.get("message") or data.get("msg") or "").lower()
+            if "token" in msg or "登录" in msg or "auth" in msg or "unauthorized" in msg:
+                return True
+        return False
+
     def _v2_get_products(self):
         url = self._url("api.php/v2/products")
         resp = self._session.get(url, timeout=15)
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if self._is_auth_fail(resp.status_code, data):
+            self._clear_login()
+            raise ZenTaoAuthError("认证失效，请重新登录")
         resp.raise_for_status()
-        data = resp.json()
         if data.get("status") != "success":
             raise ZenTaoClientError(data.get("message", "获取产品列表失败"))
         products = data.get("products") or []
@@ -206,8 +237,14 @@ class ZenTaoClient:
     def _v1_get_products(self):
         url = self._url("api.php/v1/products")
         resp = self._session.get(url, timeout=15)
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if self._is_auth_fail(resp.status_code, data):
+            self._clear_login()
+            raise ZenTaoAuthError("认证失效，请重新登录")
         resp.raise_for_status()
-        data = resp.json()
         if data.get("status") != "success":
             raise ZenTaoClientError(data.get("message", "获取产品列表失败"))
         products = data.get("products") or []
@@ -216,8 +253,14 @@ class ZenTaoClient:
     def _v2_get_bugs_for_product(self, product_id):
         url = self._url(f"api.php/v2/products/{product_id}/bugs")
         resp = self._session.get(url, timeout=15)
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if self._is_auth_fail(resp.status_code, data):
+            self._clear_login()
+            raise ZenTaoAuthError("认证失效，请重新登录")
         resp.raise_for_status()
-        data = resp.json()
         if data.get("status") != "success":
             raise ZenTaoClientError(data.get("message", "获取 Bug 列表失败"))
         return data.get("bugs") or []
@@ -225,8 +268,14 @@ class ZenTaoClient:
     def _v1_get_bugs_for_product(self, product_id):
         url = self._url(f"api.php/v1/products/{product_id}/bugs")
         resp = self._session.get(url, timeout=15)
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if self._is_auth_fail(resp.status_code, data):
+            self._clear_login()
+            raise ZenTaoAuthError("认证失效，请重新登录")
         resp.raise_for_status()
-        data = resp.json()
         if data.get("status") != "success":
             raise ZenTaoClientError(data.get("message", "获取 Bug 列表失败"))
         return data.get("bugs") or []
@@ -274,21 +323,39 @@ class ZenTaoClient:
 
     def get_products(self):
         self._ensure_login()
-        if self._api_version == "v1":
-            return self._v1_get_products()
-        if self._token:
-            return self._v2_get_products()
-        return self._legacy_get_products()
+        try:
+            if self._api_version == "v1":
+                return self._v1_get_products()
+            if self._token:
+                return self._v2_get_products()
+            return self._legacy_get_products()
+        except ZenTaoAuthError:
+            self.login()
+            if self._api_version == "v1":
+                return self._v1_get_products()
+            if self._token:
+                return self._v2_get_products()
+            return self._legacy_get_products()
 
     def get_bugs_for_product(self, product_id):
         self._ensure_login()
-        if self._api_version == "v1":
-            raw = self._v1_get_bugs_for_product(product_id)
-        elif self._token:
-            raw = self._v2_get_bugs_for_product(product_id)
-        else:
-            return self._legacy_get_bugs_for_product(product_id)
-        return [_normalize_bug(b) for b in raw]
+        try:
+            if self._api_version == "v1":
+                raw = self._v1_get_bugs_for_product(product_id)
+            elif self._token:
+                raw = self._v2_get_bugs_for_product(product_id)
+            else:
+                return self._legacy_get_bugs_for_product(product_id)
+            return [_normalize_bug(b) for b in raw]
+        except ZenTaoAuthError:
+            self.login()
+            if self._api_version == "v1":
+                raw = self._v1_get_bugs_for_product(product_id)
+            elif self._token:
+                raw = self._v2_get_bugs_for_product(product_id)
+            else:
+                return self._legacy_get_bugs_for_product(product_id)
+            return [_normalize_bug(b) for b in raw]
 
     def get_bugs_since(self, since_iso_datetime=None, product_ids=None):
         self._ensure_login()
