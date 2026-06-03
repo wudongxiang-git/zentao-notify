@@ -82,7 +82,15 @@ python main.py --once --webhook "https://open.feishu.cn/open-apis/bot/v2/hook/xx
 
 镜像内默认 `STATE_FILE=/data/state.json`，建议挂载持久化目录并传入环境变量。
 
-**阿里云 ACR 自动构建**：`Dockerfile` 默认从 `registry.cn-hangzhou.aliyuncs.com/library/python:3.11-alpine` 拉取基础镜像，并走阿里云 PyPI 源，避免 Docker Hub `429 Too Many Requests`。本地或海外构建可指定官方镜像：
+**阿里云 ACR 自动构建**：默认基础镜像为 `docker.m.daocloud.io/library/python:3.11-alpine`（DaoCloud 公共缓存），pip 走阿里云源，避免直连 `docker.io` 的 429。`registry.cn-hangzhou.aliyuncs.com/library/*` 在部分 ACR 构建环境无拉取权限，请勿使用。
+
+若 DaoCloud 不可用，可在 ACR 控制台复制 **Docker Hub 加速器地址**（形如 `xxx.mirror.aliyuncs.com`），构建时传入：
+
+```bash
+docker build --build-arg BASE_IMAGE=xxx.mirror.aliyuncs.com/library/python:3.11-alpine -t zentao-notify .
+```
+
+海外或本地直连 Docker Hub：
 
 ```bash
 docker build --build-arg BASE_IMAGE=python:3.11-alpine -t zentao-notify .

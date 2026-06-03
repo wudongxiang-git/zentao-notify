@@ -1,7 +1,8 @@
 # zentao-notify：禅道 Bug 推送到飞书（轮询 daemon）
-# 默认使用阿里云 Docker Hub 镜像缓存，避免 registry-1.docker.io 匿名拉取 429
-# 海外 CI 可覆盖：docker build --build-arg BASE_IMAGE=python:3.11-alpine .
-ARG BASE_IMAGE=registry.cn-hangzhou.aliyuncs.com/library/python:3.11-alpine
+# 默认 DaoCloud 同步 Docker Hub library，避免 docker.io 429 且无需 ACR library 命名空间权限
+# 海外 CI：docker build --build-arg BASE_IMAGE=python:3.11-alpine .
+# 若已在 ACR 控制台配置专属加速器，可传：--build-arg BASE_IMAGE=<加速器>/library/python:3.11-alpine
+ARG BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-alpine
 FROM ${BASE_IMAGE}
 
 WORKDIR /app
