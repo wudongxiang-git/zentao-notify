@@ -2,7 +2,8 @@
 禅道 API 客户端：支持 v1 / v2 / 传统 Session（开源版 21.7.6 为 v1）
 """
 import logging
-from urllib.parse import urljoin
+from datetime import datetime, timezone
+from urllib.parse import urlencode, urljoin
 
 import requests
 
@@ -21,25 +22,78 @@ class ZenTaoAuthError(ZenTaoClientError):
     pass
 
 
+def parse_zentao_datetime(value):
+    """解析禅道时间字段（本地 Y-m-d H:i:s 或 API 默认 UTC ISO）。"""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s == "0000-00-00 00:00:00":
+        return None
+    if s.endswith("Z"):
+        try:
+            dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            return dt.astimezone().replace(tzinfo=None)
+        except ValueError:
+            pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _display_user(val):
+    if isinstance(val, dict):
+        return val.get("realname") or val.get("account") or ""
+    return str(val) if val is not None else ""
+
+
 def _normalize_bug(b):
     """将禅道 Bug 对象统一为含 openedDate、lastEditedDate、product、module 等字段的字典。"""
-    opened = (b.get("openedDate") or "").strip()
-    if opened == "0000-00-00 00:00:00":
+    opened = b.get("openedDate")
+    if opened is None or opened == "0000-00-00 00:00:00":
         opened = ""
-    last_edited = (b.get("lastEditedDate") or "").strip()
-    if last_edited == "0000-00-00 00:00:00":
+    else:
+        opened = str(opened).strip()
+
+    last_edited = b.get("lastEditedDate")
+    if last_edited is None or last_edited == "0000-00-00 00:00:00":
         last_edited = ""
+    else:
+        last_edited = str(last_edited).strip()
+
+    product = b.get("productName") or b.get("product") or ""
+    if isinstance(product, dict):
+        product = product.get("name") or product.get("id") or ""
+
+    module = b.get("moduleTitle") or b.get("module") or ""
+    if isinstance(module, dict):
+        module = module.get("name") or ""
+
     return {
         "id": str(b.get("id", "")),
         "title": b.get("title") or "",
         "severity": b.get("severity") or "",
-        "status": b.get("status") or "",
-        "openedBy": b.get("openedBy") or "",
+        "status": b.get("statusName") or b.get("status") or "",
+        "openedBy": _display_user(b.get("openedBy")),
         "openedDate": opened,
         "lastEditedDate": last_edited,
-        "product": b.get("product") or b.get("productName") or "",
-        "module": b.get("module") or "",
+        "product": product,
+        "module": module,
     }
+
+
+def bug_changed_since(bug, since_datetime_str):
+    """Bug 的创建或最后编辑时间是否不早于上次检查时刻（含等于）。"""
+    since_dt = parse_zentao_datetime(since_datetime_str)
+    if since_dt is None:
+        return True
+    for key in ("openedDate", "lastEditedDate"):
+        dt = parse_zentao_datetime(bug.get(key))
+        if dt is not None and dt >= since_dt:
+            return True
+    return False
 
 
 class ZenTaoClient:
@@ -61,6 +115,7 @@ class ZenTaoClient:
         self._logged_in = False
         self._session = requests.Session()
         self._session.headers["Content-Type"] = "application/json"
+        self._product_name_cache = {}
 
     def _url(self, path):
         return urljoin(self.base_url + "/", path.lstrip("/"))
@@ -117,7 +172,9 @@ class ZenTaoClient:
                 return False
             raise ZenTaoClientError(f"v1 登录请求失败: {e}") from e
 
-        # v1 响应示例：{"token": "cuejkiesah19k1j8be5bv51ndo"}
+        if isinstance(data, dict) and data.get("error"):
+            raise ZenTaoClientError(str(data["error"]))
+
         self._token = data.get("token")
         if not self._token:
             raise ZenTaoClientError("v1 登录响应中无 token")
@@ -216,11 +273,13 @@ class ZenTaoClient:
             msg = (data.get("message") or data.get("msg") or "").lower()
             if "token" in msg or "登录" in msg or "auth" in msg or "unauthorized" in msg:
                 return True
+        if status_code == 401 and data.get("error"):
+            return True
         return False
 
-    def _v2_get_products(self):
-        url = self._url("api.php/v2/products")
-        resp = self._session.get(url, timeout=15)
+    def _get_json(self, url, params=None, timeout=30):
+        """GET 并解析 JSON，处理认证失败。"""
+        resp = self._session.get(url, params=params, timeout=timeout)
         try:
             data = resp.json()
         except ValueError:
@@ -229,56 +288,101 @@ class ZenTaoClient:
             self._clear_login()
             raise ZenTaoAuthError("认证失效，请重新登录")
         resp.raise_for_status()
+        if not isinstance(data, dict):
+            data = {}
+        return data
+
+    @staticmethod
+    def _v1_raise_if_error(data, default_msg):
+        """v1 成功体无 status 字段，失败时为 {error: ...}。"""
+        if "error" in data:
+            err = data["error"]
+            raise ZenTaoClientError(err if isinstance(err, str) else str(err))
+        return data
+
+    @staticmethod
+    def _v2_raise_if_error(data, default_msg):
         if data.get("status") != "success":
-            raise ZenTaoClientError(data.get("message", "获取产品列表失败"))
+            raise ZenTaoClientError(data.get("message", default_msg))
+
+    def _paginate_v1_list(self, url, list_key, extra_params=None):
+        """拉取 v1 分页列表（products / bugs 等）。"""
+        limit = Config.ZENTAO_API_PAGE_LIMIT
+        page = 1
+        all_items = []
+        base_params = dict(extra_params or {})
+        base_params.setdefault("timeFormat", "local")
+
+        while True:
+            params = {**base_params, "limit": limit, "page": page}
+            data = self._get_json(url, params=params)
+            data = self._v1_raise_if_error(data, f"获取 {list_key} 失败")
+            chunk = data.get(list_key) or []
+            if not isinstance(chunk, list):
+                chunk = list(chunk.values()) if isinstance(chunk, dict) else []
+            all_items.extend(chunk)
+            total = int(data.get("total") or 0)
+            if not chunk:
+                break
+            if total and page * limit >= total:
+                break
+            if len(chunk) < limit:
+                break
+            page += 1
+
+        return all_items
+
+    def _v2_get_products(self):
+        url = self._url("api.php/v2/products")
+        data = self._get_json(url)
+        self._v2_raise_if_error(data, "获取产品列表失败")
         products = data.get("products") or []
         return [{"id": str(p.get("id", "")), "name": p.get("name", "")} for p in products]
 
     def _v1_get_products(self):
         url = self._url("api.php/v1/products")
-        resp = self._session.get(url, timeout=15)
-        try:
-            data = resp.json()
-        except ValueError:
-            data = {}
-        if self._is_auth_fail(resp.status_code, data):
-            self._clear_login()
-            raise ZenTaoAuthError("认证失效，请重新登录")
-        resp.raise_for_status()
-        if data.get("status") != "success":
-            raise ZenTaoClientError(data.get("message", "获取产品列表失败"))
-        products = data.get("products") or []
-        return [{"id": str(p.get("id", "")), "name": p.get("name", "")} for p in products]
+        products = self._paginate_v1_list(url, "products")
+        result = []
+        for p in products:
+            pid = str(p.get("id", ""))
+            name = p.get("name", "")
+            result.append({"id": pid, "name": name})
+            if pid:
+                self._product_name_cache[pid] = name
+        return result
+
+    def _bug_list_params(self):
+        return {
+            "status": Config.ZENTAO_BUG_BROWSE_STATUS,
+            "timeFormat": "local",
+            "order": "id_desc",
+        }
 
     def _v2_get_bugs_for_product(self, product_id):
         url = self._url(f"api.php/v2/products/{product_id}/bugs")
-        resp = self._session.get(url, timeout=15)
-        try:
-            data = resp.json()
-        except ValueError:
-            data = {}
-        if self._is_auth_fail(resp.status_code, data):
-            self._clear_login()
-            raise ZenTaoAuthError("认证失效，请重新登录")
-        resp.raise_for_status()
-        if data.get("status") != "success":
-            raise ZenTaoClientError(data.get("message", "获取 Bug 列表失败"))
-        return data.get("bugs") or []
+        limit = Config.ZENTAO_API_PAGE_LIMIT
+        page = 1
+        all_bugs = []
+        while True:
+            params = {**self._bug_list_params(), "limit": limit, "page": page}
+            data = self._get_json(url, params=params)
+            self._v2_raise_if_error(data, "获取 Bug 列表失败")
+            chunk = data.get("bugs") or []
+            all_bugs.extend(chunk)
+            pager = data.get("pager") or {}
+            total = int(data.get("total") or (pager.get("recTotal") if isinstance(pager, dict) else 0) or 0)
+            if not chunk:
+                break
+            if total and page * limit >= total:
+                break
+            if len(chunk) < limit:
+                break
+            page += 1
+        return all_bugs
 
     def _v1_get_bugs_for_product(self, product_id):
         url = self._url(f"api.php/v1/products/{product_id}/bugs")
-        resp = self._session.get(url, timeout=15)
-        try:
-            data = resp.json()
-        except ValueError:
-            data = {}
-        if self._is_auth_fail(resp.status_code, data):
-            self._clear_login()
-            raise ZenTaoAuthError("认证失效，请重新登录")
-        resp.raise_for_status()
-        if data.get("status") != "success":
-            raise ZenTaoClientError(data.get("message", "获取 Bug 列表失败"))
-        return data.get("bugs") or []
+        return self._paginate_v1_list(url, "bugs", extra_params=self._bug_list_params())
 
     def _legacy_get_products(self):
         url = self._url("index.php?m=product&f=getList&t=json")
@@ -339,23 +443,29 @@ class ZenTaoClient:
 
     def get_bugs_for_product(self, product_id):
         self._ensure_login()
-        try:
+        pid = str(product_id)
+
+        def _fetch():
             if self._api_version == "v1":
-                raw = self._v1_get_bugs_for_product(product_id)
+                raw = self._v1_get_bugs_for_product(pid)
             elif self._token:
-                raw = self._v2_get_bugs_for_product(product_id)
+                raw = self._v2_get_bugs_for_product(pid)
             else:
-                return self._legacy_get_bugs_for_product(product_id)
-            return [_normalize_bug(b) for b in raw]
+                return self._legacy_get_bugs_for_product(pid)
+            product_name = self._product_name_cache.get(pid, "")
+            normalized = []
+            for b in raw:
+                bug = _normalize_bug(b)
+                if not bug["product"] and product_name:
+                    bug["product"] = product_name
+                normalized.append(bug)
+            return normalized
+
+        try:
+            return _fetch()
         except ZenTaoAuthError:
             self.login()
-            if self._api_version == "v1":
-                raw = self._v1_get_bugs_for_product(product_id)
-            elif self._token:
-                raw = self._v2_get_bugs_for_product(product_id)
-            else:
-                return self._legacy_get_bugs_for_product(product_id)
-            return [_normalize_bug(b) for b in raw]
+            return _fetch()
 
     def get_bugs_since(self, since_iso_datetime=None, product_ids=None):
         self._ensure_login()
@@ -378,16 +488,10 @@ class ZenTaoClient:
         if not since_iso_datetime:
             return all_bugs
 
-        since = (since_iso_datetime or "").strip()
-        result = []
-        for b in all_bugs:
-            opened = (b.get("openedDate") or "").strip()
-            last_edited = (b.get("lastEditedDate") or "").strip()
-            if opened and opened >= since:
-                result.append(b)
-            elif last_edited and last_edited >= since:
-                result.append(b)
-        return result
+        return [b for b in all_bugs if bug_changed_since(b, since_iso_datetime)]
 
     def bug_view_url(self, bug_id):
+        if Config.ZENTAO_URL_STYLE == "get":
+            query = urlencode({"m": "bug", "f": "view", "bugID": bug_id})
+            return self._url(f"index.php?{query}")
         return self._url(f"bug-view-{bug_id}.html")

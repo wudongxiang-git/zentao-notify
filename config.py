@@ -22,6 +22,12 @@ class Config:
     ZENTAO_API_KEY = os.getenv("ZENTAO_API_KEY", "")
     ZENTAO_PRODUCT_IDS = os.getenv("ZENTAO_PRODUCT_IDS", "").strip() or None
     ZENTAO_USE_LEGACY_API = os.getenv("ZENTAO_USE_LEGACY_API", "").strip().lower() in ("1", "true", "yes")
+    # REST API：Bug 列表 browseType（禅道 param 名为 status），默认 all 拉全部状态
+    ZENTAO_BUG_BROWSE_STATUS = (os.getenv("ZENTAO_BUG_BROWSE_STATUS", "all") or "all").strip()
+    # REST API 分页每页条数（产品、Bug 列表）
+    ZENTAO_API_PAGE_LIMIT = max(20, int(os.getenv("ZENTAO_API_PAGE_LIMIT", "100")))
+    # Bug 详情链接：path_info（bug-view-1.html）或 get（index.php?m=bug&f=view&bugID=1）
+    ZENTAO_URL_STYLE = (os.getenv("ZENTAO_URL_STYLE", "path_info") or "path_info").strip().lower()
 
     FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL", "").strip() or None
 

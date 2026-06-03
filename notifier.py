@@ -66,6 +66,11 @@ def run_once(webhook_url=None, state_file=None, client=None):
     if Config.ZENTAO_PRODUCT_IDS:
         product_ids = [x.strip() for x in Config.ZENTAO_PRODUCT_IDS.split(",") if x.strip()]
 
+    if is_first_run:
+        save_state(since, state_file)
+        logger.info("首次运行已写入检查时间 %s，未推送历史 Bug", since)
+        return 0
+
     if client is None:
         client = ZenTaoClient()
     notifier = FeishuNotifier(webhook_url=webhook_url or Config.FEISHU_WEBHOOK_URL)
@@ -80,7 +85,6 @@ def run_once(webhook_url=None, state_file=None, client=None):
         logger.error("获取 Bug 列表失败: %s", e)
         return 0
 
-    # 按 id 去重（同一 Bug 可能因 openedDate 与 lastEditedDate 都满足条件而出现两次）
     seen = set()
     unique_bugs = []
     for b in bugs:
@@ -90,17 +94,32 @@ def run_once(webhook_url=None, state_file=None, client=None):
             unique_bugs.append(b)
 
     pushed = 0
+    failed = 0
     for bug in unique_bugs:
         bid = bug.get("id", "")
         bug_url = client.bug_view_url(bid)
+        ok = False
         for attempt in range(3):
             if notifier.send_bug_card(bug, bug_url, webhook_url=notifier.webhook_url):
-                pushed += 1
+                ok = True
                 break
             if attempt < 2:
-                logger.warning("飞书推送重试 %s/%s", attempt + 1, 2)
+                logger.warning("飞书推送 Bug #%s 重试 %s/2", bid, attempt + 1)
+        if ok:
+            pushed += 1
+        else:
+            failed += 1
+            logger.error("飞书推送 Bug #%s 失败，已跳过", bid)
 
     now = _now_iso()
+    if failed:
+        logger.error(
+            "本轮 %s 条 Bug 推送失败，不更新 state.json（下次将重试）；成功 %s 条",
+            failed,
+            pushed,
+        )
+        return pushed
+
     save_state(now, state_file)
     logger.info("本轮检查完成，推送 %s 条 Bug，下次 since=%s", pushed, now)
     return pushed

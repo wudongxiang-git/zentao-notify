@@ -21,6 +21,8 @@ def _bug_card(bug, bug_url, header_color="blue"):
     severity = bug.get("severity") or "-"
     status = bug.get("status") or "-"
     opened_by = bug.get("openedBy") or "-"
+    if isinstance(opened_by, dict):
+        opened_by = opened_by.get("realname") or opened_by.get("account") or "-"
     opened_date = bug.get("openedDate") or "-"
     product = bug.get("product") or "-"
     module = bug.get("module") or "-"

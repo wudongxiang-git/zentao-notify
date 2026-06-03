@@ -40,6 +40,9 @@
 | `STATE_FILE` | 状态文件路径，默认 `./state.json` | 否 |
 | `ZENTAO_PRODUCT_IDS` | 只拉取指定产品 ID，逗号分隔；空则全部产品 | 否 |
 | `ZENTAO_USE_LEGACY_API` | 设为 `1`/`true` 强制使用传统 Session API | 否 |
+| `ZENTAO_BUG_BROWSE_STATUS` | REST Bug 列表范围（禅道 browseType），默认 `all` | 否 |
+| `ZENTAO_API_PAGE_LIMIT` | REST 分页每页条数，默认 `100` | 否 |
+| `ZENTAO_URL_STYLE` | Bug 链接：`path_info`（默认）或 `get` | 否 |
 
 可在项目目录下创建 `.env` 文件填写上述变量（一行一个 `KEY=VALUE`），程序启动时会优先读取。
 
@@ -131,7 +134,7 @@ zentao-notify/
 ## 禅道 API 说明
 
 - **REST v2**（21.7.8+）：`POST /api.php/v2/users/login` 获取 Token，再请求产品列表与 Bug 列表
-- **REST v1**（开源版 21.7.6）：`POST /api.php/v1/tokens` 获取 Token，再请求 `GET /api.php/v1/products`、`GET /api.php/v1/products/:id/bugs`
+- **REST v1**（开源版 21.7.6）：`POST /api.php/v1/tokens` 获取 Token；响应体为 `{products|bugs, page, total, limit}`（无 `status` 字段）；Bug 列表需分页并建议 `status=all`、`timeFormat=local`
 - **传统 Session API**：`GET index.php?m=api&f=getSessionID&t=json` → `POST index.php?m=user&f=login` → `GET index.php?m=bug&f=getList&...`；若 v1/v2 均不可用会自动切换到此模式
 
 按 `openedDate`、`lastEditedDate` 与上次检查时间过滤，只推送新产生或新更新的 Bug。
@@ -154,6 +157,8 @@ zentao-notify/
 | 飞书未收到消息 | 检查 `FEISHU_WEBHOOK_URL` 是否正确、机器人是否被禁用 |
 | 没有推送 | 首次运行只记录当前时间为 `last_check_time`，之后只推送该时间之后的新 Bug；可删除 `state.json` 后再次运行（仍按时间过滤） |
 | token 过期 | 程序会检测 401/认证失败并自动重新登录后重试一次，无需重启 |
+| 链接 404 | 若禅道为 GET 路由，设置 `ZENTAO_URL_STYLE=get` |
+| 推送失败反复重试 | 有失败时不更新 `state.json`，修复 Webhook 后会重推本轮 Bug |
 
 ---
 
